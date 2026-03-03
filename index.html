@@ -186,6 +186,10 @@
       mapCanvas.addEventListener('pointerdown', (e) => {
         isDrawingMap = true;
         mapPoints = [];
+        const rect = mapCanvas.getBoundingClientRect();
+        const y = clamp((e.clientY - rect.top), 0, rect.height);
+        // Force the first point to start exactly at x=0 with the initial click's Y
+        mapPoints.push({x: 0, y: y});
         addMapPoint(e);
       });
       mapCanvas.addEventListener('pointermove', (e) => {
@@ -194,6 +198,7 @@
       mapCanvas.addEventListener('pointerup', () => {
         isDrawingMap = false;
         if (mapPoints.length > 0) {
+          // Force the last point to end exactly at x=mapMaxDistance
           mapPoints.push({x: mapMaxDistance, y: mapPoints[mapPoints.length-1].y});
         }
         drawMapEditor();
@@ -203,7 +208,8 @@
         const rect = mapCanvas.getBoundingClientRect();
         const x = clamp((e.clientX - rect.left) / rect.width * mapMaxDistance, 0, mapMaxDistance);
         const y = clamp((e.clientY - rect.top), 0, rect.height);
-        if (mapPoints.length === 0 || x > mapPoints[mapPoints.length-1].x) {
+        // Only add if it's further right than the last point
+        if (mapPoints.length === 0 || x > mapPoints[mapPoints.length-1].x + 1) { // Add a small threshold to avoid duplicate x
           mapPoints.push({x, y});
           drawMapEditor();
         }
