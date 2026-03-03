@@ -62,8 +62,36 @@
         </div>
       </div>
       <div class="row">
+        <label>上坡衰减系数</label>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="uphillFactorNum" type="number" min="0" max="10" step="0.1" value="2.0" />
+          <input id="uphillFactorRange" type="range" min="0" max="10" step="0.1" value="2.0" />
+        </div>
+      </div>
+      <div class="row">
+        <label>下坡增益系数</label>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="downhillFactorNum" type="number" min="0" max="20" step="0.1" value="5.0" />
+          <input id="downhillFactorRange" type="range" min="0" max="20" step="0.1" value="5.0" />
+        </div>
+      </div>
+      <div class="row">
+        <label>惯性修饰下限</label>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="minTauModNum" type="number" min="0.1" max="2" step="0.1" value="0.6" />
+          <input id="minTauModRange" type="range" min="0.1" max="2" step="0.1" value="0.6" />
+        </div>
+      </div>
+      <div class="row">
+        <label>惯性修饰上限</label>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="maxTauModNum" type="number" min="1" max="10" step="0.1" value="5.0" />
+          <input id="maxTauModRange" type="range" min="1" max="10" step="0.1" value="5.0" />
+        </div>
+      </div>
+      <div class="row">
         <label><span class="star">★</span> 速度上限 vMax（m/s）</label>
-        <input id="vmaxNum" type="number" min="1" max="30" step="0.5" value="12" />
+        <input id="vmaxNum" type="number" min="1" max="30" step="0.5" value="46" />
       </div>
       <div class="row">
         <label>速度映射 scale（m/s per rad/s）</label>
@@ -80,7 +108,13 @@
         操作：按住踏板圆盘并拖拽旋转。<br />
         下坡：自动滑行，坡度越大加速越快。<br />
         上坡：不会倒退。<br />
-        电机滑行值：随坡度变化，用于驱动硬件电机。
+        <br />
+        <span style="color: #FFD54F; font-weight: bold;">【硬件开发指引】电机滑行值 (Inertia) 用法：</span><br />
+        此值代表当前路况下，踏板应具备的“惯性/阻力”感。硬件端可将其映射为电机的 <b>PWM 占空比</b> 或 <b>目标扭矩</b>：<br />
+        • <b>值较大 (如 &gt; 5)</b>：代表下坡或高速滑行。电机应主动输出正向扭矩，带动踏板“空转”，让用户感觉脚下很轻甚至被带着转。<br />
+        • <b>值较小 (如 &lt; 2)</b>：代表上坡或低速。电机应输出反向阻力（或减小正向扭矩），让用户感觉踩踏费力，没有惯性。<br />
+        • <b>平地基准 (约 2~3)</b>：电机提供基础的飞轮惯性模拟，保持平顺的踩踏路感。<br />
+        <i>注：软件端已做平滑处理，硬件端可直接以 10Hz~50Hz 频率接收并平滑过渡电机控制指令。</i>
       </div>
     </div>
   </div>
@@ -125,13 +159,19 @@
       const mapCanvas = document.getElementById('mapCanvas');
       const mapCtx = mapCanvas.getContext('2d');
 
-      function syncTau(from) {
-        const v = parseFloat(from.value);
-        tauNum.value = v;
-        tauRange.value = v;
+      function syncInput(numEl, rangeEl) {
+        const sync = (from, to) => {
+          to.value = from.value;
+        };
+        numEl.addEventListener('input', () => sync(numEl, rangeEl));
+        rangeEl.addEventListener('input', () => sync(rangeEl, numEl));
       }
-      tauNum.addEventListener('input', () => syncTau(tauNum));
-      tauRange.addEventListener('input', () => syncTau(tauRange));
+
+      syncInput(tauNum, tauRange);
+      syncInput(document.getElementById('uphillFactorNum'), document.getElementById('uphillFactorRange'));
+      syncInput(document.getElementById('downhillFactorNum'), document.getElementById('downhillFactorRange'));
+      syncInput(document.getElementById('minTauModNum'), document.getElementById('minTauModRange'));
+      syncInput(document.getElementById('maxTauModNum'), document.getElementById('maxTauModRange'));
 
       let W = 0, H = 0, DPR = 1;
       function resize() {
@@ -184,6 +224,7 @@
       }
 
       mapCanvas.addEventListener('pointerdown', (e) => {
+        mapCanvas.setPointerCapture(e.pointerId);
         isDrawingMap = true;
         mapPoints = [];
         const rect = mapCanvas.getBoundingClientRect();
@@ -195,21 +236,40 @@
       mapCanvas.addEventListener('pointermove', (e) => {
         if (isDrawingMap) addMapPoint(e);
       });
-      mapCanvas.addEventListener('pointerup', () => {
+      
+      const stopDrawingMap = (e) => {
+        if (!isDrawingMap) return;
         isDrawingMap = false;
+        if (e && e.pointerId) {
+          try { mapCanvas.releasePointerCapture(e.pointerId); } catch(err) {}
+        }
         if (mapPoints.length > 0) {
           // Force the last point to end exactly at x=mapMaxDistance
           mapPoints.push({x: mapMaxDistance, y: mapPoints[mapPoints.length-1].y});
         }
         drawMapEditor();
-      });
+      };
+
+      mapCanvas.addEventListener('pointerup', stopDrawingMap);
+      mapCanvas.addEventListener('pointercancel', stopDrawingMap);
 
       function addMapPoint(e) {
         const rect = mapCanvas.getBoundingClientRect();
         const x = clamp((e.clientX - rect.left) / rect.width * mapMaxDistance, 0, mapMaxDistance);
         const y = clamp((e.clientY - rect.top), 0, rect.height);
+        
+        // If this is the very first point being added AFTER the forced x=0 point in pointerdown
+        if (mapPoints.length === 1) {
+            // Update the Y of the first point to match if we haven't moved X much
+            if (x < 5) {
+                mapPoints[0].y = y;
+                drawMapEditor();
+                return;
+            }
+        }
+        
         // Only add if it's further right than the last point
-        if (mapPoints.length === 0 || x > mapPoints[mapPoints.length-1].x + 1) { // Add a small threshold to avoid duplicate x
+        if (mapPoints.length === 0 || x > mapPoints[mapPoints.length-1].x + 2) { // Add a small threshold to avoid duplicate x
           mapPoints.push({x, y});
           drawMapEditor();
         }
@@ -414,10 +474,31 @@
 
         if (isCoasting) {
           coastT += dt;
-          const tau = Math.max(0.2, parseFloat(tauNum.value));
           
-          // Base exponential decay
-          let decaySpeed = coastV0 * Math.exp(-Math.pow(coastT / tau, gamma));
+          // Base tau from UI
+          let baseTau = Math.max(0.2, parseFloat(tauNum.value));
+          
+          // Apply slope modifier to tau (last step to avoid confusion)
+          // Uphill (currentSlope < 0): smaller tau -> faster decay -> less inertia
+          // Downhill (currentSlope > 0): larger tau -> slower decay -> more inertia
+          // We use a multiplier based on slope. Adjust the factor to tune the effect strength.
+          // For uphill, we use a smaller factor (e.g., 2.0 instead of 5.0) so it doesn't decay too fast.
+          let uphillFactor = parseFloat(document.getElementById('uphillFactorNum').value);
+          let downhillFactor = parseFloat(document.getElementById('downhillFactorNum').value);
+          let minTauMod = parseFloat(document.getElementById('minTauModNum').value);
+          let maxTauMod = parseFloat(document.getElementById('maxTauModNum').value);
+
+          let slopeFactor = currentSlope < 0 ? uphillFactor : downhillFactor; 
+          let tauModifier = 1.0 + (currentSlope * slopeFactor); 
+          
+          // Clamp the modifier so tau doesn't become negative or absurdly large
+          // Increase the minimum clamp from 0.1 to 0.4 so uphill still retains some inertia
+          tauModifier = clamp(tauModifier, minTauMod, maxTauMod); 
+          
+          const finalTau = baseTau * tauModifier;
+          
+          // Base exponential decay using the modified tau
+          let decaySpeed = coastV0 * Math.exp(-Math.pow(coastT / finalTau, gamma));
           
           // Add downhill acceleration
           if (currentSlope > 0) {
