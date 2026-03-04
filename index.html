@@ -40,14 +40,41 @@
     .modal-body { position: relative; width: 100%; height: 300px; background: #070a10; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); cursor: crosshair; }
     .modal-footer { display: flex; justify-content: flex-end; gap: 12px; }
     #mapCanvas { width: 100%; height: 100%; border-radius: 8px; }
+    
+    /* Top Right BLE HUD */
+    .topRightHud { position: absolute; top: 20px; right: 20px; display: flex; flex-direction: column; align-items: flex-end; gap: 12px; pointer-events: none; z-index: 10; }
+    .ble-row-1 { display: flex; align-items: center; gap: 12px; pointer-events: auto; }
+    .ble-row-2 { pointer-events: auto; }
+    .ble-icon { width: 24px; height: 24px; fill: currentColor; color: rgba(255, 255, 255, 0.3); transition: color 0.3s; }
+    .ble-icon.active { color: #78c8ff; }
+    .ble-device-name { font-size: 14px; font-weight: 600; color: #e8eefc; background: rgba(0,0,0,0.4); padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(120, 200, 255, 0.3); display: none; }
+    .ble-device-name.active { display: block; }
+    .btn-disconnect { cursor: pointer; background: rgba(255, 80, 80, 0.15); border: 1px solid rgba(255, 80, 80, 0.5); color: #ff6b6b; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: bold; display: none; transition: all 0.2s; }
+    .btn-disconnect:hover { background: rgba(255, 80, 80, 0.25); }
+    .btn-disconnect.active { display: block; }
+    .btn-search { cursor: pointer; background: rgba(120, 200, 255, 0.1); border: 1px solid rgba(120, 200, 255, 0.4); color: #78c8ff; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: bold; transition: all 0.2s; }
+    .btn-search:hover { background: rgba(120, 200, 255, 0.2); border-color: rgba(120, 200, 255, 0.8); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="stage">
       <canvas id="c"></canvas>
+      
+      <div class="topRightHud">
+        <div class="ble-row-1">
+          <button class="btn-disconnect" id="disconnectBleBtn">断开蓝牙</button>
+          <div class="ble-device-name" id="bleDeviceName">Device Name</div>
+          <svg class="ble-icon" id="bleIcon" viewBox="0 0 24 24">
+            <path d="M17.71 7.71L12 2h-1v7.59L6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 11 14.41V22h1l5.71-5.71-4.3-4.29 4.3-4.29zM13 5.83l1.88 1.88L13 9.59V5.83zm1.88 10.46L13 18.17v-3.76l1.88 1.88z" />
+          </svg>
+        </div>
+        <div class="ble-row-2">
+          <button class="btn-search" id="searchBleBtn">搜索设备</button>
+        </div>
+      </div>
+
       <div class="bottomHud" id="bottomHud">
-        <button class="hudBtnToggle" id="bleBtn" style="border-color: rgba(120, 200, 255, 0.5); color: #78c8ff;">连接单车 (BLE)</button>
         <button class="hudBtn hudBtnDanger" id="brakeBtn">刹车（按住）</button>
         <button class="hudBtnNeutral" id="resetBtn">重置距离</button>
         <button class="hudBtnToggle" id="toggleTrailBtn">显示轨迹</button>
@@ -367,31 +394,63 @@
       let bleServer = null;
       let writeCharacteristic = null;
       let notifyCharacteristic = null;
+      let blePollInterval = null; // Legacy, kept for cleanup
+      let isPolling = false;
+      
+      // BLE Data Buffer for packet assembly
+      let bleBuffer = new Uint8Array(0);
 
       const SERVICE_UUID = 0xFBB0;
       const WRITE_CHAR_UUID = 0xFBB1;
       const NOTIFY_CHAR_UUID = 0xFBB2;
 
-      const bleBtn = document.getElementById('bleBtn');
+      const searchBleBtn = document.getElementById('searchBleBtn');
+      const disconnectBleBtn = document.getElementById('disconnectBleBtn');
+      const bleDeviceName = document.getElementById('bleDeviceName');
+      const bleIcon = document.getElementById('bleIcon');
 
-      bleBtn.addEventListener('click', async () => {
-        if (isBleConnected) {
-          disconnectBle();
-          return;
-        }
+      searchBleBtn.addEventListener('click', async () => {
         try {
           console.log('Requesting Bluetooth Device...');
-          bleDevice = await navigator.bluetooth.requestDevice({
-            filters: [{ services: [SERVICE_UUID] }]
+          const newBleDevice = await navigator.bluetooth.requestDevice({
+            filters: [
+              { namePrefix: 'PitPat-' }
+            ],
+            optionalServices: [SERVICE_UUID]
           });
 
+          // 如果当前已经连接了设备，且用户又选择了一个新设备，则先断开旧设备
+          if (isBleConnected) {
+            disconnectBle();
+          }
+
+          bleDevice = newBleDevice;
           bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
 
-          console.log('Connecting to GATT Server...');
-          bleServer = await bleDevice.gatt.connect();
+          let service = null;
+          let retries = 3;
+          while (retries > 0) {
+            try {
+              console.log(`Connecting to GATT Server... (Attempts left: ${retries})`);
+              bleServer = await bleDevice.gatt.connect();
+              
+              // Wait a moment to allow the connection to stabilize
+              await new Promise(resolve => setTimeout(resolve, 800));
+              
+              if (!bleDevice.gatt.connected) {
+                throw new Error("GATT Server disconnected immediately.");
+              }
 
-          console.log('Getting Service...');
-          const service = await bleServer.getPrimaryService(SERVICE_UUID);
+              console.log('Getting Service...');
+              service = await bleServer.getPrimaryService(SERVICE_UUID);
+              break; // Success
+            } catch (err) {
+              console.warn('Connection/Service error:', err);
+              retries--;
+              if (retries === 0) throw err;
+              await new Promise(resolve => setTimeout(resolve, 1500));
+            }
+          }
 
           console.log('Getting Characteristics...');
           writeCharacteristic = await service.getCharacteristic(WRITE_CHAR_UUID);
@@ -401,40 +460,214 @@
           notifyCharacteristic.addEventListener('characteristicvaluechanged', handleBleNotifications);
 
           isBleConnected = true;
-          bleBtn.textContent = '已连接单车 (断开)';
-          bleBtn.classList.add('on');
+          bleDeviceName.textContent = bleDevice.name || '未知设备';
+          bleDeviceName.classList.add('active');
+          bleIcon.classList.add('active');
+          disconnectBleBtn.classList.add('active');
+          
           brakeBtn.style.opacity = '0.3';
           brakeBtn.style.pointerEvents = 'none';
           console.log('Bluetooth Connected!');
+          
+          // Start polling hardware for data
+          startBlePolling();
         } catch (error) {
-          console.error('Bluetooth Error:', error);
-          alert('蓝牙连接失败: ' + error);
+          if (error.name === 'NotFoundError' || 
+              (error.message && error.message.toLowerCase().includes('user cancelled'))) {
+            console.log('用户取消了蓝牙连接');
+          } else {
+            console.error('Bluetooth Error:', error);
+            alert('蓝牙连接失败: ' + error);
+          }
         }
       });
+      
+      disconnectBleBtn.addEventListener('click', disconnectBle);
 
       function onDisconnected() {
         console.log('Bluetooth Disconnected');
         isBleConnected = false;
-        bleDevice = null;
+        stopBlePolling();
+        // Do not nullify bleDevice so we can attempt to reconnect if needed
         bleServer = null;
         writeCharacteristic = null;
         notifyCharacteristic = null;
-        bleBtn.textContent = '连接单车 (BLE)';
-        bleBtn.classList.remove('on');
+        
+        bleDeviceName.classList.remove('active');
+        bleIcon.classList.remove('active');
+        disconnectBleBtn.classList.remove('active');
+        
         brakeBtn.style.opacity = '1';
         brakeBtn.style.pointerEvents = 'auto';
       }
 
       function handleBleNotifications(event) {
         const value = event.target.value;
-        // TODO: Parse data from hardware and update v_hw / braking
-        // e.g., const rpm = value.getUint16(0, true);
+        const data = new Uint8Array(value.buffer);
+        
+        // Append new data to buffer
+        const newBuffer = new Uint8Array(bleBuffer.length + data.length);
+        newBuffer.set(bleBuffer);
+        newBuffer.set(data, bleBuffer.length);
+        bleBuffer = newBuffer;
+
+        // Process buffer to find complete frames
+        processBleBuffer();
+      }
+
+      function processBleBuffer() {
+        // Look for start byte 0x6A
+        let startIndex = -1;
+        for (let i = 0; i < bleBuffer.length; i++) {
+          if (bleBuffer[i] === 0x6A) {
+            startIndex = i;
+            break;
+          }
+        }
+
+        // If no start byte found, clear buffer
+        if (startIndex === -1) {
+          bleBuffer = new Uint8Array(0);
+          return;
+        }
+
+        // Discard garbage before start byte
+        if (startIndex > 0) {
+          bleBuffer = bleBuffer.slice(startIndex);
+        }
+
+        // Check if we have enough bytes for length (at least 2 bytes: 0x6A, LEN)
+        if (bleBuffer.length < 2) return;
+
+        const frameLength = bleBuffer[1];
+        const totalFrameLength = frameLength + 2; // 0x6A + LEN + [frameLength bytes]
+
+        // Check if we have the full frame
+        if (bleBuffer.length < totalFrameLength) return;
+
+        // Extract the frame
+        const frame = bleBuffer.slice(0, totalFrameLength);
+        
+        // Remove the processed frame from buffer
+        bleBuffer = bleBuffer.slice(totalFrameLength);
+
+        // Validate end byte 0x43
+        if (frame[frame.length - 1] !== 0x43) {
+          console.warn("Invalid frame end byte", frame);
+          // Try to process remaining buffer just in case
+          processBleBuffer();
+          return;
+        }
+
+        // Parse the frame
+        parseBleFrame(frame);
+        
+        // Process remaining buffer
+        if (bleBuffer.length > 0) {
+          processBleBuffer();
+        }
+      }
+
+      function parseBleFrame(frame) {
+        const cmd = frame[2];
+        const addr = frame[3];
+        const dataLen = frame[4];
+        
+        // Helper to format hex string
+        const toHex = (num) => '0x' + num.toString(16).padStart(2, '0').toUpperCase();
+        
+        // Log the raw frame
+        let frameHex = Array.from(frame).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+        
+        // Check if it's a data report frame (B0 for bike, D0 for rower, A0 for stepper)
+        if (cmd === 0xB0 || cmd === 0xD0 || cmd === 0xA0) {
+          
+          // Only parse speed from the Heartbeat Frame (Addr = 0x02)
+          if (addr === 0x02) {
+            // Absolute positions based on protocol
+            // [23] Speed High (Integer part km/h)
+            // [24] Speed Low (Decimal part 0-99)
+            const speedInt = frame[23];
+            const speedDec = frame[24];
+            const cadence = frame[25];
+            const gear = frame[5];
+            const resistance = frame[6];
+            
+            // Calculate speed in km/h
+            const speedKmh = speedInt + (speedDec / 100.0);
+            
+            // Convert km/h to m/s for our physics engine
+            const speedMs = speedKmh / 3.6;
+            
+            // Update hardware speed
+            v_hw = speedMs;
+            
+            console.log(`[BLE Heartbeat] CMD:${toHex(cmd)} ADDR:${toHex(addr)} | Speed: ${speedKmh.toFixed(2)} km/h (${speedMs.toFixed(2)} m/s) | Cadence: ${cadence} rpm | Gear: ${gear} | Res: ${resistance} | Raw: ${frameHex}`);
+          } else {
+            console.log(`[BLE Other Data] CMD:${toHex(cmd)} ADDR:${toHex(addr)} | Raw: ${frameHex}`);
+          }
+        } else {
+           console.log(`[BLE Unknown CMD] CMD:${toHex(cmd)} ADDR:${toHex(addr)} | Raw: ${frameHex}`);
+        }
       }
 
       function disconnectBle() {
+        stopBlePolling();
         if (!bleDevice) return;
         if (bleDevice.gatt.connected) {
           bleDevice.gatt.disconnect();
+        }
+      }
+
+      async function startBlePolling() {
+        if (isPolling) return;
+        isPolling = true;
+        
+        // 1. Send "Start Machine" command (0x51 0x80 0x01 0x10)
+        if (writeCharacteristic) {
+          const startCmd = new Uint8Array([0x6A, 0x06, 0x51, 0x80, 0x01, 0x10, 0, 0x43]);
+          let fcs = 0;
+          for(let i = 0; i < 6; i++) fcs ^= startCmd[i];
+          startCmd[6] = fcs;
+          try {
+            await writeCharacteristic.writeValue(startCmd);
+            // Wait a bit after sending start command
+            await new Promise(resolve => setTimeout(resolve, 200));
+          } catch (e) {
+            console.error("Start Cmd Error:", e);
+          }
+        }
+
+        // 2. Poll Heartbeat data (Addr 0x02, Len 0x17)
+        // Use async loop instead of setInterval to prevent "GATT operation already in progress"
+        while (isPolling && isBleConnected && writeCharacteristic) {
+          const pollCmd = new Uint8Array([0x6A, 0x05, 0x50, 0x02, 0x17, 0, 0x43]);
+          let fcs = 0;
+          for(let i = 0; i < 5; i++) fcs ^= pollCmd[i];
+          pollCmd[5] = fcs;
+          
+          try {
+            await writeCharacteristic.writeValue(pollCmd);
+          } catch (e) {
+            console.error("Poll Error:", e);
+            // If device disconnected, break the loop
+            if (e.name === 'NetworkError' || (e.message && e.message.toLowerCase().includes('disconnect'))) {
+              break;
+            }
+          }
+          
+          // Wait 500ms before next poll to avoid overwhelming the hardware
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        
+        isPolling = false;
+      }
+
+      function stopBlePolling() {
+        isPolling = false;
+        if (blePollInterval) {
+          clearInterval(blePollInterval);
+          blePollInterval = null;
         }
       }
       // ---------------------------
@@ -521,22 +754,33 @@
 
         pedal.omega = pedal.omegaSmooth;
         const scale = parseFloat(scaleNum.value), vmax = parseFloat(vmaxNum.value), eps = parseFloat(epsNum.value);
-        v_continuous = clamp(Math.abs(pedal.omega) * scale, 0, vmax);
-        vInt += v_continuous * dt; tInt += dt;
+        
+        // Only update v_continuous and v_hw from UI pedal if BLE is NOT connected
+        if (!isBleConnected) {
+          v_continuous = clamp(Math.abs(pedal.omega) * scale, 0, vmax);
+          vInt += v_continuous * dt; tInt += dt;
 
-        sampleAccum += dt;
-        if (sampleAccum >= 1.0) {
-          const steps = Math.floor(sampleAccum / 1.0);
-          for (let i = 0; i < steps; i++) {
-            const avg = (tInt > 0) ? (vInt / tInt) : 0;
-            v_hw = (v_continuous > eps) ? avg : 0;
-            if (v_hw > eps) lastNonZeroSpeed = v_hw;
-            const prevDist = hardwareDistance;
-            hardwareDistance += v_hw * 1.0;
-            v_hw_eff = Math.max(0, (hardwareDistance - prevDist) / 1.0);
-            vInt = 0; tInt = 0;
+          sampleAccum += dt;
+          if (sampleAccum >= 1.0) {
+            const steps = Math.floor(sampleAccum / 1.0);
+            for (let i = 0; i < steps; i++) {
+              const avg = (tInt > 0) ? (vInt / tInt) : 0;
+              v_hw = (v_continuous > eps) ? avg : 0;
+              if (v_hw > eps) lastNonZeroSpeed = v_hw;
+              const prevDist = hardwareDistance;
+              hardwareDistance += v_hw * 1.0;
+              v_hw_eff = Math.max(0, (hardwareDistance - prevDist) / 1.0);
+              vInt = 0; tInt = 0;
+            }
+            sampleAccum -= steps * 1.0;
           }
-          sampleAccum -= steps * 1.0;
+        } else {
+          // When BLE is connected, v_hw is updated directly by parseBleFrame
+          // We just need to update hardwareDistance and lastNonZeroSpeed
+          if (v_hw > eps) lastNonZeroSpeed = v_hw;
+          const prevDist = hardwareDistance;
+          hardwareDistance += v_hw * dt;
+          v_hw_eff = v_hw; // Direct pass-through for hardware
         }
 
         const v_hw_game = Math.max(v_hw, v_hw_eff);
