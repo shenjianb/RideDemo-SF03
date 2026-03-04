@@ -12,9 +12,10 @@
     canvas { width: 100%; height: 100%; background: radial-gradient(1200px 800px at 20% 20%, #142033, #070a10); border-radius: 14px; }
     .panel { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 14px; padding: 12px; overflow: auto; }
     .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0; }
-    .row label { font-size: 13px; opacity: .9; flex: 0 0 84px; white-space: nowrap; line-height: 1.2; }
-    .row input[type="number"] { width: 120px; padding: 6px 8px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, .12); background: rgba(0, 0, 0, .25); color: #e8eefc; }
-    .row input[type="range"] { width: 170px; }
+    .row label { font-size: 13px; opacity: .9; flex: 0 0 130px; line-height: 1.2; }
+    .row input[type="number"] { width: 60px; padding: 6px 8px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, .12); background: rgba(0, 0, 0, .25); color: #e8eefc; }
+    .row input[type="range"] { flex: 1; min-width: 0; }
+    .row > div { flex: 1; display: flex; gap: 8px; align-items: center; }
     .grid { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 10px; }
     .kv { display: flex; justify-content: space-between; gap: 10px; padding: 6px 8px; border-radius: 10px; background: rgba(0, 0, 0, 0.18); border: 1px solid rgba(255, 255, 255, 0.06); }
     .k { opacity: .85; font-size: 12px; }
@@ -90,6 +91,13 @@
         </div>
       </div>
       <div class="row">
+        <label><span class="star">★</span>路面摩擦系数 (0=冰面, 2=泥地)</label>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="frictionNum" type="number" min="0" max="5" step="0.1" value="0.1" />
+          <input id="frictionRange" type="range" min="0" max="5" step="0.1" value="0.1" />
+        </div>
+      </div>
+      <div class="row">
         <label><span class="star">★</span> 速度上限 vMax（m/s）</label>
         <input id="vmaxNum" type="number" min="1" max="30" step="0.5" value="46" />
       </div>
@@ -110,7 +118,7 @@
         上坡：不会倒退。<br />
         <br />
         <span style="color: #FFD54F; font-weight: bold;">【硬件开发指引】电机滑行值 (Inertia) 用法：</span><br />
-        注：踩踏阻力与滑行空转已分离，此值<b>仅用于控制“模拟滑行空转”</b>。硬件端可将其映射为电机正向驱动的 <b>PWM 占空比</b> 或 <b>目标扭矩</b>：<br />
+        注：踩踏阻力 与 滑行空转 分离，此值<b>仅用于控制“模拟滑行空转”</b>。硬件端可将其映射为电机正向驱动的 <b>PWM 占空比</b> 或 <b>目标扭矩</b>：<br />
         • <b>值较大 (如 &gt; 5)</b>：代表下坡或高速滑行。电机应主动输出较大的正向扭矩，带动踏板“空转”，模拟强烈的惯性滑行感。<br />
         • <b>值较小 (如 &lt; 2)</b>：代表上坡或低速。滑行惯性弱，电机仅输出微弱的正向扭矩或不输出，踏板不会自动跟随转动。<br />
         • <b>平地基准 (约 2~3)</b>：电机提供基础的飞轮空转惯性，保持平顺的滑行跟随感。<br />
@@ -172,6 +180,7 @@
       syncInput(document.getElementById('downhillFactorNum'), document.getElementById('downhillFactorRange'));
       syncInput(document.getElementById('minTauModNum'), document.getElementById('minTauModRange'));
       syncInput(document.getElementById('maxTauModNum'), document.getElementById('maxTauModRange'));
+      syncInput(document.getElementById('frictionNum'), document.getElementById('frictionRange'));
 
       let W = 0, H = 0, DPR = 1;
       function resize() {
@@ -473,44 +482,58 @@
         }
 
         if (isCoasting) {
-          coastT += dt;
-          
-          // Base tau from UI
-          let baseTau = Math.max(0.2, parseFloat(tauNum.value));
-          
-          // Apply slope modifier to tau (last step to avoid confusion)
-          // Uphill (currentSlope < 0): smaller tau -> faster decay -> less inertia
-          // Downhill (currentSlope > 0): larger tau -> slower decay -> more inertia
-          // We use a multiplier based on slope. Adjust the factor to tune the effect strength.
-          // For uphill, we use a smaller factor (e.g., 2.0 instead of 5.0) so it doesn't decay too fast.
-          let uphillFactor = parseFloat(document.getElementById('uphillFactorNum').value);
-          let downhillFactor = parseFloat(document.getElementById('downhillFactorNum').value);
-          let minTauMod = parseFloat(document.getElementById('minTauModNum').value);
-          let maxTauMod = parseFloat(document.getElementById('maxTauModNum').value);
+          if (braking) {
+            // When braking, immediately kill all coasting speed and inertia
+            coastSpeed = 0;
+            coastV0 = 0;
+            isCoasting = false;
+          } else {
+            coastT += dt;
+            
+            // Base tau from UI
+            let baseTau = Math.max(0.2, parseFloat(tauNum.value));
+            
+            // Apply slope modifier to tau (last step to avoid confusion)
+            // Uphill (currentSlope < 0): smaller tau -> faster decay -> less inertia
+            // Downhill (currentSlope > 0): larger tau -> slower decay -> more inertia
+            // We use a multiplier based on slope. Adjust the factor to tune the effect strength.
+            // For uphill, we use a smaller factor (e.g., 2.0 instead of 5.0) so it doesn't decay too fast.
+            let uphillFactor = parseFloat(document.getElementById('uphillFactorNum').value);
+            let downhillFactor = parseFloat(document.getElementById('downhillFactorNum').value);
+            let minTauMod = parseFloat(document.getElementById('minTauModNum').value);
+            let maxTauMod = parseFloat(document.getElementById('maxTauModNum').value);
 
-          let slopeFactor = currentSlope < 0 ? uphillFactor : downhillFactor; 
-          let tauModifier = 1.0 + (currentSlope * slopeFactor); 
-          
-          // Clamp the modifier so tau doesn't become negative or absurdly large
-          // Increase the minimum clamp from 0.1 to 0.4 so uphill still retains some inertia
-          tauModifier = clamp(tauModifier, minTauMod, maxTauMod); 
-          
-          const finalTau = baseTau * tauModifier;
-          
-          // Base exponential decay using the modified tau
-          let decaySpeed = coastV0 * Math.exp(-Math.pow(coastT / finalTau, gamma));
-          
-          // Add downhill acceleration
-          if (currentSlope > 0) {
-            decaySpeed += downhillAccel * 10; // amplify for demo effect
-            coastV0 = decaySpeed; // update base speed for next frame decay
-            coastT = 0; // reset coast time to prevent immediate decay of new speed
-          }
+            let slopeFactor = currentSlope < 0 ? uphillFactor : downhillFactor; 
+            let tauModifier = 1.0 + (currentSlope * slopeFactor); 
+            
+            // Clamp the modifier so tau doesn't become negative or absurdly large
+            // Increase the minimum clamp from 0.1 to 0.4 so uphill still retains some inertia
+            tauModifier = clamp(tauModifier, minTauMod, maxTauMod); 
+            
+            let friction = parseFloat(document.getElementById('frictionNum').value);
+            
+            // Friction reduces the final inertia (tau)
+            const finalTau = (baseTau * tauModifier) / (1.0 + friction * 3.0);
+            
+            // Base exponential decay using the modified tau
+            let decaySpeed = coastV0 * Math.exp(-Math.pow(coastT / finalTau, gamma));
+            
+            // Add downhill acceleration
+            if (currentSlope > 0) {
+              let gravityAccel = downhillAccel * 10; // amplify for demo effect
+              // Friction counteracts gravity acceleration
+              let netAccel = Math.max(0, gravityAccel - (friction * dt * 5.0));
+              
+              decaySpeed += netAccel; 
+              coastV0 = decaySpeed; // update base speed for next frame decay
+              coastT = 0; // reset coast time to prevent immediate decay of new speed
+            }
 
-          coastSpeed = clamp(decaySpeed, 0, vmax);
+            coastSpeed = clamp(decaySpeed, 0, vmax);
 
-          if (coastSpeed < eps && currentSlope <= 0) {
-            coastSpeed = 0; isCoasting = false; coastV0 = 0;
+            if (coastSpeed < eps && currentSlope <= 0) {
+              coastSpeed = 0; isCoasting = false; coastV0 = 0;
+            }
           }
         } else {
           coastSpeed = 0;
@@ -526,7 +549,9 @@
         // High inertia when coasting fast or going downhill. Low inertia when going uphill.
         // We use a smoothed value to avoid rapid motor changes.
         let targetInertia = 0;
-        if (currentSlope > 0) {
+        if (braking) {
+            targetInertia = 2; // Reset to base inertia when braking
+        } else if (currentSlope > 0) {
             targetInertia = 5 + currentSlope * 10 + (bike.vUsed * 0.5); // Downhill: high inertia
         } else if (currentSlope < 0) {
             targetInertia = Math.max(0.5, 2 + currentSlope * 5); // Uphill: low inertia (harder to pedal)
@@ -647,48 +672,111 @@
       }
 
       function drawBikeRider(x, groundY) {
-        const s = DPR, wheelR = 16 * s, wheelY = groundY - wheelR;
-        const backX = x - 34 * s, frontX = x + 34 * s;
+        const s = DPR;
+        const scale = 1.0 * s;
+        // SVG coordinates mapping (SVG origin 105, 103 maps to x, groundY)
+        const svgToX = (sx) => x + (sx - 105) * scale;
+        const svgToY = (sy) => groundY + (sy - 103) * scale;
+
         ctx.save();
         // Rotation based on slope
-        ctx.translate(x, wheelY);
+        ctx.translate(x, groundY);
         ctx.rotate(Math.atan(currentSlope));
-        ctx.translate(-x, -wheelY);
+        ctx.translate(-x, -groundY);
 
-        ctx.strokeStyle = 'rgba(232,238,252,0.85)'; ctx.lineWidth = 3 * s;
-        ctx.beginPath(); ctx.arc(backX, wheelY, wheelR, 0, Math.PI * 2); ctx.stroke();
-        ctx.beginPath(); ctx.arc(frontX, wheelY, wheelR, 0, Math.PI * 2); ctx.stroke();
+        // 1. Frame
+        ctx.strokeStyle = '#94A3B8';
+        ctx.lineWidth = 2.5 * scale;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        
+        ctx.beginPath();
+        ctx.moveTo(svgToX(60), svgToY(85));
+        ctx.lineTo(svgToX(95), svgToY(50));
+        ctx.lineTo(svgToX(140), svgToY(50));
+        ctx.lineTo(svgToX(150), svgToY(85));
+        ctx.stroke();
 
-        ctx.strokeStyle = 'rgba(232,238,252,0.75)'; ctx.lineWidth = 4 * s; ctx.lineCap = 'round';
-        const seatX = x - 6 * s, seatY = wheelY - 36 * s, headX = x + 18 * s, headY = wheelY - 42 * s, crankX = x - 2 * s, crankY = wheelY - 10 * s;
-        const hipL = { x: seatX - 10 * s, y: seatY - 2 * s }, hipR = { x: seatX + 4 * s, y: seatY - 2 * s };
-        const pedalR = 15 * s, footOffset = 4 * s, pedalAng = pedal.angle, ex = 1.00, ey = 1.18;
-        const footAt = (ang) => ({ x: crankX + Math.cos(ang) * (pedalR + footOffset) * ex, y: crankY + Math.sin(ang) * (pedalR + footOffset) * ey });
-        const footL = footAt(pedalAng), footR = footAt(pedalAng + Math.PI);
-        const thighL = 26 * s, shinL = 22 * s, kneeDirL = { x: 1, y: 0.15 }, kneeDirR = { x: 1, y: 0.15 };
-        const ikL = solve2LinkIK(hipL, footL, thighL, shinL, kneeDirL), ikR = solve2LinkIK(hipR, footR, thighL, shinL, kneeDirR);
+        ctx.beginPath();
+        ctx.moveTo(svgToX(95), svgToY(50));
+        ctx.lineTo(svgToX(85), svgToY(85));
+        ctx.lineTo(svgToX(60), svgToY(85));
+        ctx.stroke();
 
-        ctx.strokeStyle = 'rgba(232,238,252,0.88)'; ctx.lineWidth = 4 * s; ctx.lineCap = 'round';
-        const line = (x1, y1, x2, y2) => { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); };
-        line(hipL.x, hipL.y, ikL.knee.x, ikL.knee.y); line(ikL.knee.x, ikL.knee.y, footL.x, footL.y);
-        line(hipR.x, hipR.y, ikR.knee.x, ikR.knee.y); line(ikR.knee.x, ikR.knee.y, footR.x, footR.y);
+        // 2. Wheels
+        ctx.strokeStyle = '#475569';
+        ctx.lineWidth = 3 * scale;
+        ctx.beginPath(); ctx.arc(svgToX(60), svgToY(85), 18 * scale, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(svgToX(150), svgToY(85), 18 * scale, 0, Math.PI * 2); ctx.stroke();
 
-        ctx.fillStyle = 'rgba(232,238,252,0.92)';
-        ctx.beginPath(); ctx.arc(footL.x, footL.y, 3.2 * s, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(footR.x, footR.y, 3.2 * s, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = 'rgba(232,238,252,0.75)';
-        ctx.beginPath(); ctx.arc(ikL.knee.x, ikL.knee.y, 2.6 * s, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(ikR.knee.x, ikR.knee.y, 2.6 * s, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = 'rgba(232,238,252,0.6)';
-        ctx.beginPath(); ctx.arc(hipL.x, hipL.y, 2.2 * s, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(hipR.x, hipR.y, 2.2 * s, 0, Math.PI * 2); ctx.fill();
+        // 3. IK Legs Math
+        const crankX = svgToX(105);
+        const crankY = svgToY(75);
+        const pedalR = 12 * scale; 
+        
+        const pedalAng = pedal.angle;
+        // Use an ellipse for pedaling to look more natural
+        const ex = 1.00, ey = 1.18;
+        const footL = { x: crankX + Math.cos(pedalAng) * pedalR * ex, y: crankY + Math.sin(pedalAng) * pedalR * ey };
+        const footR = { x: crankX + Math.cos(pedalAng + Math.PI) * pedalR * ex, y: crankY + Math.sin(pedalAng + Math.PI) * pedalR * ey };
+        
+        const hipX = svgToX(95);
+        const hipY = svgToY(45);
+        
+        const thighL = 22 * scale;
+        const shinL = 22 * scale;
+        const kneeDir = { x: 1, y: 0.15 };
+        
+        const ikL = solve2LinkIK({x: hipX, y: hipY}, footL, thighL, shinL, kneeDir);
+        const ikR = solve2LinkIK({x: hipX, y: hipY}, footR, thighL, shinL, kneeDir);
 
-        line(backX, wheelY, crankX, crankY); line(crankX, crankY, frontX, wheelY); line(backX, wheelY, seatX, seatY); line(seatX, seatY, frontX, wheelY); line(frontX, wheelY, headX, headY);
-        ctx.lineWidth = 5 * s; line(seatX - 10 * s, seatY, seatX + 10 * s, seatY); line(headX - 10 * s, headY, headX + 6 * s, headY - 6 * s);
-        ctx.lineWidth = 4 * s; line(seatX, seatY - 2 * s, headX - 2 * s, headY - 6 * s); line(seatX - 2 * s, seatY + 6 * s, crankX, crankY + 2 * s); line(headX - 10 * s, headY - 2 * s, headX + 2 * s, headY - 6 * s);
-        ctx.fillStyle = 'rgba(232,238,252,0.92)'; ctx.beginPath(); ctx.arc(headX - 2 * s, headY - 14 * s, 8 * s, 0, Math.PI * 2); ctx.fill();
-        ctx.strokeStyle = 'rgba(120,200,255,0.9)'; ctx.lineWidth = 4 * s;
-        ctx.beginPath(); ctx.moveTo(crankX, crankY); ctx.lineTo(crankX + Math.cos(pedal.angle) * 14 * s, crankY + Math.sin(pedal.angle) * 14 * s); ctx.stroke();
+        // 4. Back Leg (Right leg)
+        ctx.lineWidth = 4.5 * scale;
+        ctx.strokeStyle = '#1e293b';
+        ctx.globalAlpha = 0.6;
+        ctx.beginPath(); 
+        ctx.moveTo(hipX, hipY); 
+        ctx.lineTo(ikR.knee.x, ikR.knee.y); 
+        ctx.lineTo(footR.x, footR.y); 
+        ctx.stroke();
+        ctx.globalAlpha = 1.0;
+
+        // 5. Crank arms
+        ctx.strokeStyle = '#64748B';
+        ctx.lineWidth = 2.5 * scale;
+        ctx.beginPath(); ctx.moveTo(crankX, crankY); ctx.lineTo(footL.x, footL.y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(crankX, crankY); ctx.lineTo(footR.x, footR.y); ctx.stroke();
+
+        // 6. Crank center
+        ctx.fillStyle = '#64748B';
+        ctx.beginPath(); ctx.arc(crankX, crankY, 5 * scale, 0, Math.PI * 2); ctx.fill();
+
+        // 7. Rider Upper Body
+        ctx.strokeStyle = '#F1F5F9';
+        ctx.lineWidth = 3.5 * scale;
+        ctx.beginPath();
+        ctx.moveTo(svgToX(105), svgToY(26)); // Shoulder
+        ctx.lineTo(hipX, hipY);              // Hip
+        ctx.stroke();
+        
+        ctx.beginPath();
+        ctx.moveTo(svgToX(96), svgToY(32));  // Arm start
+        ctx.lineTo(svgToX(138), svgToY(42)); // Hands
+        ctx.stroke();
+        
+        // Head
+        ctx.fillStyle = '#F1F5F9';
+        ctx.beginPath(); ctx.arc(svgToX(105), svgToY(20), 6 * scale, 0, Math.PI * 2); ctx.fill();
+
+        // 8. Front Leg (Left leg)
+        ctx.lineWidth = 4.5 * scale;
+        ctx.strokeStyle = '#F1F5F9';
+        ctx.beginPath(); 
+        ctx.moveTo(hipX, hipY); 
+        ctx.lineTo(ikL.knee.x, ikL.knee.y); 
+        ctx.lineTo(footL.x, footL.y); 
+        ctx.stroke();
+
         ctx.restore();
       }
 
