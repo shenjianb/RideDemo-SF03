@@ -504,7 +504,9 @@
 
       function handleBleNotifications(event) {
         const value = event.target.value;
-        const data = new Uint8Array(value.buffer);
+        // IMPORTANT: DataView may be a slice into a larger buffer.
+        // Respect byteOffset/byteLength to avoid parsing stale bytes.
+        const data = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
         
         // Append new data to buffer
         const newBuffer = new Uint8Array(bleBuffer.length + data.length);
