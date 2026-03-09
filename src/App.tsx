@@ -1,8 +1,253 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
+import {useEffect, useMemo, useRef, useState} from 'react';
+import {createPortal} from 'react-dom';
+
+type LogLevel = 'info' | 'warn' | 'error';
+type FrameKind = 'start' | 'heartbeat' | 'unknown';
+
+type LogItem = {
+  ts: string;
+  level: LogLevel;
+  message: string;
+};
+
+const SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';
+const CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
+const START_FRAME_TYPE = 0x01;
+const HEARTBEAT_FRAME_TYPE = 0x02;
+const HEARTBEAT_TIMEOUT_MS = 15_000;
+
+function parseFrame(view: DataView): {kind: FrameKind; rawHex: string} {
+  const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+  const rawHex = Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join(' ');
+
+  const kind: FrameKind =
+    bytes[0] === START_FRAME_TYPE
+      ? 'start'
+      : bytes[0] === HEARTBEAT_FRAME_TYPE
+        ? 'heartbeat'
+        : 'unknown';
+
+  return {kind, rawHex};
+}
 
 export default function App() {
-  return <div></div>;
+  const [connected, setConnected] = useState(false);
+  const [externalConnected, setExternalConnected] = useState(false);
+  const [startFrameReceived, setStartFrameReceived] = useState(false);
+  const [lastHeartbeatAt, setLastHeartbeatAt] = useState<number | null>(null);
+  const [logs, setLogs] = useState<LogItem[]>([]);
+  const [panelOpen, setPanelOpen] = useState(true);
+
+  const deviceRef = useRef<any>(null);
+
+  const pushLog = (message: string, level: LogLevel = 'info') => {
+    setLogs((prev) => [{ts: new Date().toLocaleTimeString(), level, message}, ...prev].slice(0, 80));
+  };
+
+  const isAnyConnected = connected || externalConnected;
+
+  useEffect(() => {
+    if (isAnyConnected) {
+      setPanelOpen(true);
+    }
+  }, [isAnyConnected]);
+
+  useEffect(() => {
+    const refreshExternalConnection = async () => {
+      const nav = navigator as any;
+      if (!nav.bluetooth?.getDevices) {
+        return;
+      }
+
+      try {
+        const devices = await nav.bluetooth.getDevices();
+        setExternalConnected(devices.some((d: any) => Boolean(d.gatt?.connected)));
+      } catch {
+        setExternalConnected(false);
+      }
+    };
+
+    void refreshExternalConnection();
+    const timer = window.setInterval(() => void refreshExternalConnection(), 2_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!connected) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      if (!lastHeartbeatAt) {
+        return;
+      }
+      if (Date.now() - lastHeartbeatAt > HEARTBEAT_TIMEOUT_MS) {
+        pushLog(`心跳超时（>${HEARTBEAT_TIMEOUT_MS / 1000}s），请检查硬件发送逻辑。`, 'warn');
+      }
+    }, 1_000);
+
+    return () => window.clearInterval(timer);
+  }, [connected, lastHeartbeatAt]);
+
+  const onDisconnected = () => {
+    setConnected(false);
+    setStartFrameReceived(false);
+    setLastHeartbeatAt(null);
+    pushLog('蓝牙断开连接。', 'warn');
+  };
+
+  const onFrameReceived = (event: Event) => {
+    const characteristic = event.target as any;
+    if (!characteristic.value) {
+      return;
+    }
+
+    const {kind, rawHex} = parseFrame(characteristic.value);
+
+    if (kind === 'start') {
+      if (startFrameReceived) {
+        pushLog(`收到重复起始帧：${rawHex}`, 'warn');
+      } else {
+        setStartFrameReceived(true);
+        pushLog(`收到起始帧：${rawHex}`);
+      }
+      return;
+    }
+
+    if (kind === 'heartbeat') {
+      if (!startFrameReceived) {
+        pushLog(`起始帧前收到心跳帧：${rawHex}`, 'warn');
+      }
+      setLastHeartbeatAt(Date.now());
+      pushLog(`收到心跳帧：${rawHex}`);
+      return;
+    }
+
+    pushLog(`收到未知帧：${rawHex}`, 'warn');
+  };
+
+  const connect = async () => {
+    try {
+      const nav = navigator as any;
+      const device = await nav.bluetooth.requestDevice({
+        filters: [{services: [SERVICE_UUID]}],
+        optionalServices: [SERVICE_UUID],
+      });
+
+      deviceRef.current = device;
+      pushLog(`已选择设备：${device.name ?? '未命名设备'}`);
+
+      const server = await device.gatt?.connect();
+      if (!server) {
+        throw new Error('未能获取 GATT 连接');
+      }
+
+      const service = await server.getPrimaryService(SERVICE_UUID);
+      const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+      await characteristic.startNotifications();
+
+      characteristic.addEventListener('characteristicvaluechanged', onFrameReceived);
+      device.addEventListener('gattserverdisconnected', onDisconnected);
+
+      setConnected(true);
+      setStartFrameReceived(false);
+      setLastHeartbeatAt(null);
+      setPanelOpen(true);
+      pushLog('蓝牙连接成功，开始监听起始帧/心跳帧。');
+    } catch (error) {
+      pushLog(`连接失败：${String(error)}`, 'error');
+    }
+  };
+
+  const statusText = useMemo(() => {
+    if (!isAnyConnected) return '未连接';
+    if (!startFrameReceived) return '已连接，等待起始帧';
+    return '已连接，通讯中';
+  }, [isAnyConnected, startFrameReceived]);
+
+  const monitorButton = isAnyConnected ? (
+    <button
+      type="button"
+      style={{left: '48px', top: '52px'}}
+      className="fixed z-[2147483647] rounded-md border border-emerald-300 bg-emerald-900/95 px-3 py-2 text-sm font-semibold text-emerald-100 shadow-2xl"
+      onClick={() => setPanelOpen((v) => !v)}
+    >
+      {panelOpen ? '隐藏监控' : '显示监控'}
+    </button>
+  ) : null;
+
+  const monitorPanel = panelOpen ? (
+    <section className="fixed left-4 top-16 z-[2147483647] w-[min(640px,calc(100vw-2rem))] rounded-lg border border-cyan-500/60 bg-slate-900/95 p-4 shadow-2xl backdrop-blur">
+      <h1 className="text-lg font-bold text-cyan-300">SF03 蓝牙协议监控面板</h1>
+      <p className="mt-1 text-sm text-slate-300">状态：{statusText}</p>
+      <p className="text-sm text-slate-300">起始帧：{startFrameReceived ? '已收到' : '未收到'}</p>
+      <p className="text-sm text-slate-300">
+        最近心跳：{lastHeartbeatAt ? new Date(lastHeartbeatAt).toLocaleTimeString() : '暂无'}
+      </p>
+
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          className="rounded-md bg-cyan-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
+          onClick={connect}
+          disabled={connected}
+        >
+          {connected ? '已连接' : '连接蓝牙设备'}
+        </button>
+      </div>
+
+      <div className="mt-3 max-h-64 overflow-auto rounded border border-slate-700 p-2 text-xs">
+        {logs.length === 0 ? (
+          <p className="text-slate-400">暂无日志</p>
+        ) : (
+          logs.map((log, idx) => (
+            <p
+              key={`${log.ts}-${idx}`}
+              className={
+                log.level === 'error'
+                  ? 'text-red-300'
+                  : log.level === 'warn'
+                    ? 'text-amber-200'
+                    : 'text-slate-200'
+              }
+            >
+              [{log.ts}] {log.message}
+            </p>
+          ))
+        )}
+      </div>
+    </section>
+  ) : null;
+
+  return (
+    <main className="min-h-screen bg-slate-950 text-slate-100">
+      {!isAnyConnected && (
+        <div className="p-4">
+          <button
+            type="button"
+            className="rounded-md bg-cyan-600 px-3 py-2 text-sm font-medium text-white"
+            onClick={connect}
+          >
+            连接蓝牙设备并打开监控
+          </button>
+        </div>
+      )}
+
+      {createPortal(
+        <>
+          {monitorButton}
+          {monitorPanel}
+        </>,
+        document.body,
+      )}
+
+      {isAnyConnected && (
+        <div className="fixed left-3 top-3 z-[999999] rounded border border-emerald-400 bg-emerald-950/90 px-2 py-1 text-xs text-emerald-200">
+          监控入口：左上角“显示/隐藏监控”
+        </div>
+      )}
+    </main>
+  );
 }
