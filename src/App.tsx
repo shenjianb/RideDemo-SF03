@@ -38,17 +38,15 @@ export default function App() {
   const [startFrameReceived, setStartFrameReceived] = useState(false);
   const [lastHeartbeatAt, setLastHeartbeatAt] = useState<number | null>(null);
   const [logs, setLogs] = useState<LogItem[]>([]);
+  const [panelOpen, setPanelOpen] = useState(true);
 
   const deviceRef = useRef<BluetoothDevice | null>(null);
   const characteristicRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
 
   const pushLog = (message: string, level: LogLevel = 'info') => {
     setLogs((prev) => {
-      const next = [
-        {ts: new Date().toLocaleTimeString(), level, message},
-        ...prev,
-      ];
-      return next.slice(0, 60);
+      const next = [{ts: new Date().toLocaleTimeString(), level, message}, ...prev];
+      return next.slice(0, 80);
     });
   };
 
@@ -63,47 +61,18 @@ export default function App() {
       }
 
       if (Date.now() - lastHeartbeatAt > HEARTBEAT_TIMEOUT_MS) {
-        pushLog(
-          `心跳超时（>${HEARTBEAT_TIMEOUT_MS / 1000}s），请检查硬件连接与发送逻辑。`,
-          'warn',
-        );
+        pushLog(`心跳超时（>${HEARTBEAT_TIMEOUT_MS / 1000}s），请检查硬件发送逻辑。`, 'warn');
       }
     }, 1_000);
 
     return () => window.clearInterval(timer);
   }, [connected, lastHeartbeatAt]);
 
-  const connect = async () => {
-    try {
-      const device = await navigator.bluetooth.requestDevice({
-        filters: [{services: [SERVICE_UUID]}],
-        optionalServices: [SERVICE_UUID],
-      });
-
-      deviceRef.current = device;
-      pushLog(`已选择设备：${device.name ?? '未命名设备'}`);
-
-      const server = await device.gatt?.connect();
-      if (!server) {
-        throw new Error('未能获取 GATT 连接');
-      }
-
-      const service = await server.getPrimaryService(SERVICE_UUID);
-      const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
-      characteristicRef.current = characteristic;
-
-      await characteristic.startNotifications();
-      characteristic.addEventListener('characteristicvaluechanged', onFrameReceived);
-
-      device.addEventListener('gattserverdisconnected', onDisconnected);
-
-      setConnected(true);
-      setStartFrameReceived(false);
-      setLastHeartbeatAt(null);
-      pushLog('蓝牙连接成功，开始监听起始帧/心跳帧。');
-    } catch (error) {
-      pushLog(`连接失败：${String(error)}`, 'error');
-    }
+  const onDisconnected = () => {
+    setConnected(false);
+    setStartFrameReceived(false);
+    setLastHeartbeatAt(null);
+    pushLog('蓝牙断开连接。', 'warn');
   };
 
   const onFrameReceived = (event: Event) => {
@@ -136,82 +105,102 @@ export default function App() {
     pushLog(`收到未知帧：${rawHex}`, 'warn');
   };
 
-  const onDisconnected = () => {
-    setConnected(false);
-    setStartFrameReceived(false);
-    setLastHeartbeatAt(null);
-    pushLog('蓝牙断开连接。', 'warn');
+  const connect = async () => {
+    try {
+      const device = await navigator.bluetooth.requestDevice({
+        filters: [{services: [SERVICE_UUID]}],
+        optionalServices: [SERVICE_UUID],
+      });
+
+      deviceRef.current = device;
+      pushLog(`已选择设备：${device.name ?? '未命名设备'}`);
+
+      const server = await device.gatt?.connect();
+      if (!server) {
+        throw new Error('未能获取 GATT 连接');
+      }
+
+      const service = await server.getPrimaryService(SERVICE_UUID);
+      const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+      characteristicRef.current = characteristic;
+
+      await characteristic.startNotifications();
+      characteristic.addEventListener('characteristicvaluechanged', onFrameReceived);
+      device.addEventListener('gattserverdisconnected', onDisconnected);
+
+      setConnected(true);
+      setStartFrameReceived(false);
+      setLastHeartbeatAt(null);
+      pushLog('蓝牙连接成功，开始监听起始帧/心跳帧。');
+    } catch (error) {
+      pushLog(`连接失败：${String(error)}`, 'error');
+    }
   };
 
   const statusText = useMemo(() => {
-    if (!connected) {
-      return '未连接';
-    }
-    if (!startFrameReceived) {
-      return '已连接，等待起始帧';
-    }
+    if (!connected) return '未连接';
+    if (!startFrameReceived) return '已连接，等待起始帧';
     return '已连接，通讯中';
   }, [connected, startFrameReceived]);
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 p-6">
-      <div className="mx-auto max-w-3xl space-y-5">
-        <h1 className="text-2xl font-bold">SF03 蓝牙协议联调面板</h1>
+    <main className="min-h-screen bg-slate-950 text-slate-100">
+      <button
+        type="button"
+        className="fixed left-4 top-4 z-50 rounded-md border border-cyan-500/40 bg-slate-900/90 px-3 py-2 text-sm"
+        onClick={() => setPanelOpen((v) => !v)}
+      >
+        {panelOpen ? '隐藏' : '显示'}协议监控面板
+      </button>
 
-        <section className="rounded-lg border border-gray-700 p-4 space-y-3">
-          <p>状态：{statusText}</p>
-          <p>起始帧：{startFrameReceived ? '已收到' : '未收到'}</p>
-          <p>
-            最近心跳：
-            {lastHeartbeatAt
-              ? new Date(lastHeartbeatAt).toLocaleTimeString()
-              : '暂无'}
+      {panelOpen && (
+        <section className="fixed left-4 top-16 z-50 w-[min(640px,calc(100vw-2rem))] rounded-lg border border-cyan-500/40 bg-slate-900/95 p-4 shadow-2xl backdrop-blur">
+          <h1 className="text-lg font-bold text-cyan-300">SF03 蓝牙协议监控面板</h1>
+          <p className="mt-1 text-sm text-slate-300">状态：{statusText}</p>
+          <p className="text-sm text-slate-300">起始帧：{startFrameReceived ? '已收到' : '未收到'}</p>
+          <p className="text-sm text-slate-300">
+            最近心跳：{lastHeartbeatAt ? new Date(lastHeartbeatAt).toLocaleTimeString() : '暂无'}
           </p>
-          <button
-            type="button"
-            className="rounded-md bg-blue-500 px-4 py-2 font-medium text-white disabled:opacity-60"
-            onClick={connect}
-            disabled={connected}
-          >
-            {connected ? '已连接' : '连接蓝牙设备'}
-          </button>
-        </section>
 
-        <section className="rounded-lg border border-gray-700 p-4">
-          <h2 className="mb-2 text-lg font-semibold">软硬件通讯流程（当前实现）</h2>
-          <ol className="list-decimal space-y-1 pl-6 text-sm text-gray-300">
-            <li>前端调用 Web Bluetooth 建立 GATT 连接，并订阅通知特征值。</li>
-            <li>连接成功后，等待硬件发送一次起始帧（0x01）。</li>
-            <li>连接期间持续接收心跳帧（0x02），并更新最近心跳时间。</li>
-            <li>若先收到心跳或重复起始帧，会记录告警日志。</li>
-            <li>若 15 秒未收到心跳，会标记心跳超时告警。</li>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              className="rounded-md bg-cyan-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
+              onClick={connect}
+              disabled={connected}
+            >
+              {connected ? '已连接' : '连接蓝牙设备'}
+            </button>
+          </div>
+
+          <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-slate-300">
+            <li>连接后应先收到一次起始帧（0x01）。</li>
+            <li>连接期间应持续收到心跳帧（0x02）。</li>
+            <li>若 15 秒未收到心跳，将记录超时告警。</li>
           </ol>
-        </section>
 
-        <section className="rounded-lg border border-gray-700 p-4">
-          <h2 className="mb-2 text-lg font-semibold">接收日志</h2>
-          <ul className="space-y-1 text-sm">
+          <div className="mt-3 max-h-64 overflow-auto rounded border border-slate-700 p-2 text-xs">
             {logs.length === 0 ? (
-              <li className="text-gray-400">暂无日志</li>
+              <p className="text-slate-400">暂无日志</p>
             ) : (
               logs.map((log, idx) => (
-                <li
+                <p
                   key={`${log.ts}-${idx}`}
                   className={
                     log.level === 'error'
                       ? 'text-red-300'
                       : log.level === 'warn'
-                        ? 'text-yellow-200'
-                        : 'text-gray-200'
+                        ? 'text-amber-200'
+                        : 'text-slate-200'
                   }
                 >
                   [{log.ts}] {log.message}
-                </li>
+                </p>
               ))
             )}
-          </ul>
+          </div>
         </section>
-      </div>
+      )}
     </main>
   );
 }
