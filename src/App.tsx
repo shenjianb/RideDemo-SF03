@@ -1,4 +1,5 @@
 import {useEffect, useMemo, useRef, useState} from 'react';
+import {createPortal} from 'react-dom';
 
 type LogLevel = 'info' | 'warn' | 'error';
 
@@ -145,16 +146,20 @@ export default function App() {
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
-      <button
-        type="button"
-        className="fixed left-4 top-4 z-50 rounded-md border border-cyan-500/40 bg-slate-900/90 px-3 py-2 text-sm"
-        onClick={() => setPanelOpen((v) => !v)}
-      >
-        {panelOpen ? '隐藏' : '显示'}协议监控面板
-      </button>
+      {createPortal(
+        <button
+          type="button"
+          className="fixed left-4 top-4 z-[2147483647] rounded-md border border-cyan-300 bg-slate-900 px-3 py-2 text-sm font-semibold text-cyan-200 shadow-2xl"
+          onClick={() => setPanelOpen((v) => !v)}
+        >
+          {panelOpen ? '隐藏' : '显示'}协议监控面板
+        </button>,
+        document.body,
+      )}
 
-      {panelOpen && (
-        <section className="fixed left-4 top-16 z-50 w-[min(640px,calc(100vw-2rem))] rounded-lg border border-cyan-500/40 bg-slate-900/95 p-4 shadow-2xl backdrop-blur">
+      {panelOpen &&
+        createPortal(
+          <section className="fixed left-4 top-16 z-[2147483647] w-[min(640px,calc(100vw-2rem))] rounded-lg border border-cyan-500/60 bg-slate-900/95 p-4 shadow-2xl backdrop-blur">
           <h1 className="text-lg font-bold text-cyan-300">SF03 蓝牙协议监控面板</h1>
           <p className="mt-1 text-sm text-slate-300">状态：{statusText}</p>
           <p className="text-sm text-slate-300">起始帧：{startFrameReceived ? '已收到' : '未收到'}</p>
@@ -199,8 +204,9 @@ export default function App() {
               ))
             )}
           </div>
-        </section>
-      )}
+        </section>,
+          document.body,
+        )}
     </main>
   );
 }
