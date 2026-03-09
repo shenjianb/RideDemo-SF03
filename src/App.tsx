@@ -2,7 +2,6 @@ import {useEffect, useMemo, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
 
 type LogLevel = 'info' | 'warn' | 'error';
-
 type FrameKind = 'start' | 'heartbeat' | 'unknown';
 
 type LogItem = {
@@ -36,13 +35,13 @@ function parseFrame(view: DataView): {kind: FrameKind; rawHex: string} {
 
 export default function App() {
   const [connected, setConnected] = useState(false);
+  const [externalConnected, setExternalConnected] = useState(false);
   const [startFrameReceived, setStartFrameReceived] = useState(false);
   const [lastHeartbeatAt, setLastHeartbeatAt] = useState<number | null>(null);
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [panelOpen, setPanelOpen] = useState(true);
 
-  const deviceRef = useRef<BluetoothDevice | null>(null);
-  const characteristicRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
+  const deviceRef = useRef<any>(null);
 
   const pushLog = (message: string, level: LogLevel = 'info') => {
     setLogs((prev) => {
@@ -50,6 +49,41 @@ export default function App() {
       return next.slice(0, 80);
     });
   };
+
+  useEffect(() => {
+    const refreshExternalConnection = async () => {
+      const nav = navigator as any;
+      if (!nav.bluetooth?.getDevices) {
+        return;
+      }
+
+      try {
+        const devices = await nav.bluetooth.getDevices();
+        setExternalConnected(devices.some((d) => Boolean(d.gatt?.connected)));
+      } catch {
+        setExternalConnected(false);
+      }
+    };
+
+    void refreshExternalConnection();
+    const timer = window.setInterval(() => {
+      void refreshExternalConnection();
+    }, 2_000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const isAnyConnected = connected || externalConnected;
+
+  useEffect(() => {
+    const onHotkey = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'm') {
+        setPanelOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onHotkey);
+    return () => window.removeEventListener('keydown', onHotkey);
+  }, []);
 
   useEffect(() => {
     if (!connected) {
@@ -78,7 +112,7 @@ export default function App() {
   };
 
   const onFrameReceived = (event: Event) => {
-    const characteristic = event.target as BluetoothRemoteGATTCharacteristic;
+    const characteristic = event.target as any;
     if (!characteristic.value) {
       return;
     }
@@ -109,7 +143,8 @@ export default function App() {
 
   const connect = async () => {
     try {
-      const device = await navigator.bluetooth.requestDevice({
+      const nav = navigator as any;
+      const device = await nav.bluetooth.requestDevice({
         filters: [{services: [SERVICE_UUID]}],
         optionalServices: [SERVICE_UUID],
       });
@@ -124,7 +159,6 @@ export default function App() {
 
       const service = await server.getPrimaryService(SERVICE_UUID);
       const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
-      characteristicRef.current = characteristic;
 
       await characteristic.startNotifications();
       characteristic.addEventListener('characteristicvaluechanged', onFrameReceived);
@@ -140,73 +174,75 @@ export default function App() {
   };
 
   const statusText = useMemo(() => {
-    if (!connected) return '未连接';
+    if (!isAnyConnected) return '未连接';
     if (!startFrameReceived) return '已连接，等待起始帧';
     return '已连接，通讯中';
-  }, [connected, startFrameReceived]);
+  }, [isAnyConnected, startFrameReceived]);
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
-            {connected &&
+      {isAnyConnected &&
         createPortal(
           <button
             type="button"
-            className="fixed left-12 top-8 z-[2147483647] rounded-md border border-emerald-300 bg-emerald-900/95 px-3 py-2 text-sm font-semibold text-emerald-100 shadow-2xl"
+            style={{left: '48px', top: 'calc(env(safe-area-inset-top) + 52px)'}}
+            className="fixed z-[2147483647] rounded-md border border-emerald-300 bg-emerald-900/95 px-3 py-2 text-sm font-semibold text-emerald-100 shadow-2xl"
             onClick={() => setPanelOpen((v) => !v)}
+            title="Ctrl+Shift+M 也可打开"
           >
             {panelOpen ? '隐藏监控' : '显示监控'}
           </button>,
           document.body,
         )}
 
-      {(panelOpen || !connected) &&
+      {(panelOpen || !isAnyConnected) &&
         createPortal(
           <section className="fixed left-4 top-16 z-[2147483647] w-[min(640px,calc(100vw-2rem))] rounded-lg border border-cyan-500/60 bg-slate-900/95 p-4 shadow-2xl backdrop-blur">
-          <h1 className="text-lg font-bold text-cyan-300">SF03 蓝牙协议监控面板</h1>
-          <p className="mt-1 text-sm text-slate-300">状态：{statusText}</p>
-          <p className="text-sm text-slate-300">起始帧：{startFrameReceived ? '已收到' : '未收到'}</p>
-          <p className="text-sm text-slate-300">
-            最近心跳：{lastHeartbeatAt ? new Date(lastHeartbeatAt).toLocaleTimeString() : '暂无'}
-          </p>
+            <h1 className="text-lg font-bold text-cyan-300">SF03 蓝牙协议监控面板</h1>
+            <p className="mt-1 text-sm text-slate-300">状态：{statusText}</p>
+            <p className="text-sm text-slate-300">起始帧：{startFrameReceived ? '已收到' : '未收到'}</p>
+            <p className="text-sm text-slate-300">
+              最近心跳：{lastHeartbeatAt ? new Date(lastHeartbeatAt).toLocaleTimeString() : '暂无'}
+            </p>
 
-          <div className="mt-3 flex gap-2">
-            <button
-              type="button"
-              className="rounded-md bg-cyan-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
-              onClick={connect}
-              disabled={connected}
-            >
-              {connected ? '已连接' : '连接蓝牙设备'}
-            </button>
-          </div>
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button"
+                className="rounded-md bg-cyan-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
+                onClick={connect}
+                disabled={connected}
+              >
+                {connected ? '已连接' : '连接蓝牙设备'}
+              </button>
+            </div>
 
-          <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-slate-300">
-            <li>连接后应先收到一次起始帧（0x01）。</li>
-            <li>连接期间应持续收到心跳帧（0x02）。</li>
-            <li>若 15 秒未收到心跳，将记录超时告警。</li>
-          </ol>
+            <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-slate-300">
+              <li>连接后应先收到一次起始帧（0x01）。</li>
+              <li>连接期间应持续收到心跳帧（0x02）。</li>
+              <li>若 15 秒未收到心跳，将记录超时告警。</li>
+            </ol>
 
-          <div className="mt-3 max-h-64 overflow-auto rounded border border-slate-700 p-2 text-xs">
-            {logs.length === 0 ? (
-              <p className="text-slate-400">暂无日志</p>
-            ) : (
-              logs.map((log, idx) => (
-                <p
-                  key={`${log.ts}-${idx}`}
-                  className={
-                    log.level === 'error'
-                      ? 'text-red-300'
-                      : log.level === 'warn'
-                        ? 'text-amber-200'
-                        : 'text-slate-200'
-                  }
-                >
-                  [{log.ts}] {log.message}
-                </p>
-              ))
-            )}
-          </div>
-        </section>,
+            <div className="mt-3 max-h-64 overflow-auto rounded border border-slate-700 p-2 text-xs">
+              {logs.length === 0 ? (
+                <p className="text-slate-400">暂无日志</p>
+              ) : (
+                logs.map((log, idx) => (
+                  <p
+                    key={`${log.ts}-${idx}`}
+                    className={
+                      log.level === 'error'
+                        ? 'text-red-300'
+                        : log.level === 'warn'
+                          ? 'text-amber-200'
+                          : 'text-slate-200'
+                    }
+                  >
+                    [{log.ts}] {log.message}
+                  </p>
+                ))
+              )}
+            </div>
+          </section>,
           document.body,
         )}
     </main>
