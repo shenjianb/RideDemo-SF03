@@ -73,6 +73,7 @@ export default function App() {
     setConnected(false);
     setStartFrameReceived(false);
     setLastHeartbeatAt(null);
+    setPanelOpen(true);
     pushLog('蓝牙断开连接。', 'warn');
   };
 
@@ -146,18 +147,19 @@ export default function App() {
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
-      {createPortal(
-        <button
-          type="button"
-          className="fixed left-4 top-4 z-[2147483647] rounded-md border border-cyan-300 bg-slate-900 px-3 py-2 text-sm font-semibold text-cyan-200 shadow-2xl"
-          onClick={() => setPanelOpen((v) => !v)}
-        >
-          {panelOpen ? '隐藏' : '显示'}协议监控面板
-        </button>,
-        document.body,
-      )}
+            {connected &&
+        createPortal(
+          <button
+            type="button"
+            className="fixed left-12 top-8 z-[2147483647] rounded-md border border-emerald-300 bg-emerald-900/95 px-3 py-2 text-sm font-semibold text-emerald-100 shadow-2xl"
+            onClick={() => setPanelOpen((v) => !v)}
+          >
+            {panelOpen ? '隐藏监控' : '显示监控'}
+          </button>,
+          document.body,
+        )}
 
-      {panelOpen &&
+      {(panelOpen || !connected) &&
         createPortal(
           <section className="fixed left-4 top-16 z-[2147483647] w-[min(640px,calc(100vw-2rem))] rounded-lg border border-cyan-500/60 bg-slate-900/95 p-4 shadow-2xl backdrop-blur">
           <h1 className="text-lg font-bold text-cyan-300">SF03 蓝牙协议监控面板</h1>
