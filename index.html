@@ -260,32 +260,59 @@
       syncInput(document.getElementById('frictionNum'), document.getElementById('frictionRange'));
 
       const resistanceNum = document.getElementById('resistanceNum');
-      resistanceNum.addEventListener('input', () => {
-        if (isBleConnected) {
-          sendResistance(parseInt(resistanceNum.value));
+      let lastSentResistance = -1;
+      let resistanceDebounceTimer = null;
+
+      function handleResistanceChange(val) {
+        if (resistanceDebounceTimer) {
+          clearTimeout(resistanceDebounceTimer);
         }
+        
+        resistanceDebounceTimer = setTimeout(async () => {
+          if (val !== lastSentResistance) {
+            logToMonitor('OUT', `准备发送最终阻力挡位: ${val}`);
+            
+            if (isBleConnected) {
+              await sendResistance(val);
+              lastSentResistance = val;
+            }
+          }
+        }, 300); // 300ms debounce
+      }
+
+      resistanceNum.addEventListener('input', (e) => {
+        handleResistanceChange(parseInt(e.target.value));
       });
 
+      let isSendingResistance = false;
+
       async function sendResistance(val) {
-        if (!writeCharacteristic) return;
-        // 0x51, 0x83, 2 bytes (int16)
-        // Command: 6A 06 51 83 [val_h] [val_l] [fcs] 43
-        const valH = (val >> 8) & 0xFF;
-        const valL = val & 0xFF;
-        let cmdToSend = new Uint8Array([0x6A, 0x06, 0x51, 0x83, valH, valL, 0, 0x43]);
-        let fcs = 0;
-        for(let i = 0; i < cmdToSend.length - 2; i++) fcs ^= cmdToSend[i];
-        cmdToSend[cmdToSend.length - 2] = fcs;
+        if (!writeCharacteristic || isSendingResistance) return;
+        isSendingResistance = true;
+        
+        // Protocol: 0x8A 0x07 0x51 0x82 0x02 [gear_h] [gear_l] [fcs] 0x43
+        // FCS rule: 指令长度、指令码、数据地址、数据长度与数据码所有字节按位异或生成
+        const gearHigh = (val >> 8) & 0xFF;
+        const gearLow = val & 0xFF;
+        
+        // Bytes to XOR: LEN(0x07), CMD(0x51), ADDR(0x82), DATA_LEN(0x02), DATA_H(gearHigh), DATA_L(gearLow)
+        let fcs = 0x07 ^ 0x51 ^ 0x82 ^ 0x02 ^ gearHigh ^ gearLow;
+        
+        let cmdToSend = new Uint8Array([0x8A, 0x07, 0x51, 0x82, 0x02, gearHigh, gearLow, fcs, 0x43]);
         
         try {
+          console.log("正在执行 BLE 写入操作:", cmdToSend);
           if (writeCharacteristic.properties.writeWithoutResponse) {
             await writeCharacteristic.writeValueWithoutResponse(cmdToSend);
           } else {
             await writeCharacteristic.writeValueWithResponse(cmdToSend);
           }
-          logToMonitor('OUT', `设置阻力: ${val}`, cmdToSend);
+          const hexCmd = Array.from(cmdToSend).map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+          logToMonitor('OUT', `设置阻力挡位: ${val}, 指令: ${hexCmd}`, cmdToSend);
         } catch (e) {
           console.warn("BLE Write Error (Resistance):", e.name, e.message);
+        } finally {
+          isSendingResistance = false;
         }
       }
 
@@ -482,9 +509,9 @@
       // BLE Data Buffer for packet assembly
       let bleBuffer = new Uint8Array(0);
 
-      const SERVICE_UUID = 0xFBB0;
-      const WRITE_CHAR_UUID = 0xFBB1;
-      const NOTIFY_CHAR_UUID = 0xFBB2;
+      const SERVICE_UUID = '0000fbb0-0000-1000-8000-00805f9b34fb';
+      const WRITE_CHAR_UUID = '0000fbb1-0000-1000-8000-00805f9b34fb';
+      const NOTIFY_CHAR_UUID = '0000fbb2-0000-1000-8000-00805f9b34fb';
 
       const searchBleBtn = document.getElementById('searchBleBtn');
       const disconnectBleBtn = document.getElementById('disconnectBleBtn');
