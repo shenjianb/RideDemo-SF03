@@ -535,9 +535,7 @@
         try {
           console.log('Requesting Bluetooth Device...');
           const newBleDevice = await navigator.bluetooth.requestDevice({
-            filters: [
-              { namePrefix: 'PitPat-' }
-            ],
+            acceptAllDevices: true,
             optionalServices: [SERVICE_UUID]
           });
 
