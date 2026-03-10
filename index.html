@@ -125,6 +125,13 @@
 
     <div class="panel">
       <div class="row">
+        <label><span class="star">★</span> 阻力设置 (0-1000)</label>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="resistanceNum" type="number" min="0" max="1000" step="1" value="0" />
+          <input id="resistanceRange" type="range" min="0" max="1000" step="1" value="0" />
+        </div>
+      </div>
+      <div class="row">
         <label><span class="star">★</span> 惯性值</label>
         <div style="display:flex; gap:8px; align-items:center;">
           <input id="tauNum" type="number" min="0.2" max="12" step="0.1" value="2.5" />
@@ -245,11 +252,42 @@
       }
 
       syncInput(tauNum, tauRange);
+      syncInput(document.getElementById('resistanceNum'), document.getElementById('resistanceRange'));
       syncInput(document.getElementById('uphillFactorNum'), document.getElementById('uphillFactorRange'));
       syncInput(document.getElementById('downhillFactorNum'), document.getElementById('downhillFactorRange'));
       syncInput(document.getElementById('minTauModNum'), document.getElementById('minTauModRange'));
       syncInput(document.getElementById('maxTauModNum'), document.getElementById('maxTauModRange'));
       syncInput(document.getElementById('frictionNum'), document.getElementById('frictionRange'));
+
+      const resistanceNum = document.getElementById('resistanceNum');
+      resistanceNum.addEventListener('input', () => {
+        if (isBleConnected) {
+          sendResistance(parseInt(resistanceNum.value));
+        }
+      });
+
+      async function sendResistance(val) {
+        if (!writeCharacteristic) return;
+        // 0x51, 0x83, 2 bytes (int16)
+        // Command: 6A 06 51 83 [val_h] [val_l] [fcs] 43
+        const valH = (val >> 8) & 0xFF;
+        const valL = val & 0xFF;
+        let cmdToSend = new Uint8Array([0x6A, 0x06, 0x51, 0x83, valH, valL, 0, 0x43]);
+        let fcs = 0;
+        for(let i = 0; i < cmdToSend.length - 2; i++) fcs ^= cmdToSend[i];
+        cmdToSend[cmdToSend.length - 2] = fcs;
+        
+        try {
+          if (writeCharacteristic.properties.writeWithoutResponse) {
+            await writeCharacteristic.writeValueWithoutResponse(cmdToSend);
+          } else {
+            await writeCharacteristic.writeValueWithResponse(cmdToSend);
+          }
+          logToMonitor('OUT', `设置阻力: ${val}`, cmdToSend);
+        } catch (e) {
+          console.warn("BLE Write Error (Resistance):", e.name, e.message);
+        }
+      }
 
       let W = 0, H = 0, DPR = 1;
       function resize() {
@@ -535,7 +573,9 @@
         try {
           console.log('Requesting Bluetooth Device...');
           const newBleDevice = await navigator.bluetooth.requestDevice({
-            acceptAllDevices: true,
+            filters: [
+              { namePrefix: 'PitPat-' }
+            ],
             optionalServices: [SERVICE_UUID]
           });
 
@@ -654,10 +694,10 @@
       }
 
       function processBleBuffer() {
-        // Look for start byte 0x6A (SF01 Protocol)
+        // Look for start byte 0x8A (SF01 Protocol response frames)
         let startIndex = -1;
         for (let i = 0; i < bleBuffer.length; i++) {
-          if (bleBuffer[i] === 0x6A) {
+          if (bleBuffer[i] === 0x8A) {
             startIndex = i;
             break;
           }
@@ -674,11 +714,12 @@
           bleBuffer = bleBuffer.slice(startIndex);
         }
 
-        // Check if we have enough bytes for length (at least 2 bytes: 0x6A, LEN)
+        // Check if we have enough bytes for length (at least 2 bytes: 0x8A, LEN)
+        // Assuming the protocol is 0x8A, LEN, ...
         if (bleBuffer.length < 2) return;
 
-        const frameLength = bleBuffer[1];
-        const totalFrameLength = frameLength + 2; // 0x6A + LEN + [frameLength bytes]
+        const dataLen = bleBuffer[1];
+        const totalFrameLength = 2 + dataLen; // 0x8A + LEN + [dataLen bytes]
 
         // Check if we have the full frame
         if (bleBuffer.length < totalFrameLength) return;
@@ -689,14 +730,6 @@
         // Remove the processed frame from buffer
         bleBuffer = bleBuffer.slice(totalFrameLength);
 
-        // Validate end byte 0x43
-        if (frame[frame.length - 1] !== 0x43) {
-          console.warn("Invalid frame end byte", frame);
-          // Try to process remaining buffer just in case
-          processBleBuffer();
-          return;
-        }
-
         // Parse the frame
         parseBleFrame(frame);
         
@@ -706,10 +739,12 @@
         }
       }
 
-      function parseBleFrame(frame) {
+      async function parseBleFrame(frame) {
+        // New structure: 0x8A, LEN, CMD, ADDR, ...
+        // If it's a heartbeat frame, it might be 0x8A, LEN, 0xB0, ADDR, ...
         const cmd = frame[2];
         const addr = frame[3];
-        const dataLen = frame[4];
+        const dataLen = frame[1]; // LEN is at index 1
         
         // Helper to format hex string
         const toHex = (num) => '0x' + num.toString(16).padStart(2, '0').toUpperCase();
@@ -725,22 +760,60 @@
           if (addr === 0x02) {
             hasReceivedHeartbeat = true;
             
-            // SF01 Protocol Speed: [19][20][21] in meters/hour (m/h)
-            const speedMh = (frame[19] << 16) | (frame[20] << 8) | frame[21];
-            const speedKmh = speedMh / 1000.0;
-            const speedMs = speedMh / 3600.0;
+            // SF01 Protocol Heartbeat Frame (Addr = 0x02)
+            // Based on provided mapping:
+            // btdata[5][6] = 阻力 (档位)
+            // btdata[7][8] = 运行时间
+            // btdata[9][10][11] = 距离
+            // btdata[12][13][14] = 卡路里
+            // btdata[15][16][17] = 圈数
+            // btdata[19][20][21] = 速度
+            // btdata[22] = 踏频
+            // btdata[23] = 运动编号
             
-            const cadence = frame[22]; // Cadence is at [22]
-            const gear = (frame[5] << 8) | frame[6]; // Gear is 2 bytes [5][6]
+            const resistance = (frame[5] << 8) | frame[6];
+            const time = (frame[7] << 8) | frame[8];
+            const distance = (frame[9] << 16) | (frame[10] << 8) | frame[11];
+            const calories = (frame[12] << 16) | (frame[13] << 8) | frame[14];
+            const revolutions = (frame[15] << 16) | (frame[16] << 8) | frame[17];
+            const speedMh = (frame[19] << 16) | (frame[20] << 8) | frame[21];
+            const cadence = frame[22];
+            const motionId = frame[23];
+
+            const speedKmh = speedMh / 100.0; // Based on example 600 -> 36km/h, 600/100=6? Wait, example says 600百米/分钟 = 36km/h. 
+            // 600百米 = 60km. 60km/min = 3600km/h. That seems too fast. 
+            // If 600 is 36km/h, then 600 / X = 36 => X = 600/36 = 16.66.
+            // Let's re-read: 600百米/分钟 = 36km/h. 
+            // 600百米 = 60000米 = 60km. 60km/min = 3600km/h.
+            // Maybe it's 600米/分钟 = 36km/h? 600米/min = 0.6km/min = 36km/h. Yes, this makes sense.
+            // 36000 (0x8CA0) -> 36km/h
+            // 36000 / 1000 = 36
+            const speedKmhCalc = speedMh / 1000.0;
+            const speedMs = speedKmhCalc / 3.6;
             
             // Update hardware speed
             v_hw = speedMs;
             
-            const logMsg = `心跳包: 速度=${speedKmh.toFixed(2)}km/h, 踏频=${cadence}rpm, 挡位=${gear}`;
+            const logMsg = `心跳: 阻力=${resistance}, 时间=${time}s, 距离=${distance}m, 热量=${calories}cal, 圈数=${revolutions}, 速度=${speedKmhCalc.toFixed(2)}km/h, 踏频=${cadence}rpm, 运动编号=${motionId}`;
             logToMonitor('IN', logMsg, frame);
-            console.log(`[SF01 Heartbeat] Speed: ${speedKmh.toFixed(2)} km/h (${speedMs.toFixed(2)} m/s) | Cadence: ${cadence} rpm | Gear: ${gear} | Raw: ${frameHex}`);
+            console.log(`[SF01 Heartbeat] ${logMsg} | Raw: ${frameHex}`);
           } else if (addr === 0x2C || addr === 0x30) {
             logToMonitor('IN', addr === 0x2C ? '起始帧 (待机)' : '配置帧', frame);
+            
+            // If it's a configuration frame (0x30), reply with the handshake command
+            if (addr === 0x30) {
+              const handshakeCmd = new Uint8Array([0x6A, 0x05, 0xFD, 0xFB, 0x43]);
+              try {
+                if (writeCharacteristic.properties.writeWithoutResponse) {
+                  await writeCharacteristic.writeValueWithoutResponse(handshakeCmd);
+                } else {
+                  await writeCharacteristic.writeValueWithResponse(handshakeCmd);
+                }
+                logToMonitor('OUT', "发送握手回复 (6A 05 FD FB 43)", handshakeCmd);
+              } catch (e) {
+                console.warn("BLE Write Error (Handshake):", e.name, e.message);
+              }
+            }
           } else {
             logToMonitor('IN', `其他数据 (ADDR:${toHex(addr)})`, frame);
             console.log(`[SF01 Other] ADDR:${toHex(addr)} | Raw: ${frameHex}`);
@@ -764,26 +837,10 @@
         isPolling = true;
         hasReceivedHeartbeat = false;
 
-        // Use async loop instead of setInterval to prevent "GATT operation already in progress"
-        while (isPolling && isBleConnected && writeCharacteristic) {
-          let cmdToSend;
-          
-          // Only send "Start Machine" if we haven't seen any heartbeat AND we haven't tried too many times
-          // Or if we haven't seen ANY data from the device yet.
-          let cmdName = "";
-          
-          // If we haven't seen ANY data at all, keep trying Start Machine for a bit longer
-          if (!hasReceivedHeartbeat && startCommandCount < 10 && !hasReceivedAnyData) {
-            // 1. Send "Start Machine" command (0x80 = 0x10) using 0x6A start byte
-            cmdToSend = new Uint8Array([0x6A, 0x06, 0x51, 0x80, 0x01, 0x10, 0, 0x43]);
-            startCommandCount++;
-            cmdName = "发送开机指令";
-          } else {
-            // 2. Poll Heartbeat data (Addr 0x02, Len 0x17) using 0x6A start byte
-            cmdToSend = new Uint8Array([0x6A, 0x05, 0x50, 0x02, 0x17, 0, 0x43]);
-            cmdName = "发送心跳查询";
-          }
-          
+        // Hardware automatically sends heartbeat frames.
+        // We only send "Start Machine" if we haven't seen any data yet.
+        if (!hasReceivedAnyData) {
+          let cmdToSend = new Uint8Array([0x6A, 0x06, 0x51, 0x80, 0x01, 0x10, 0, 0x43]);
           let fcs = 0;
           for(let i = 0; i < cmdToSend.length - 2; i++) fcs ^= cmdToSend[i];
           cmdToSend[cmdToSend.length - 2] = fcs;
@@ -794,20 +851,10 @@
             } else {
               await writeCharacteristic.writeValueWithResponse(cmdToSend);
             }
-            logToMonitor('OUT', cmdName, cmdToSend);
+            logToMonitor('OUT', "发送开机指令", cmdToSend);
           } catch (e) {
-            // Ignore NotSupportedError, it often happens when hardware is busy processing pedaling
-            if (e.name !== 'NotSupportedError') {
-              console.warn("BLE Write Error:", e.name, e.message);
-            }
-            // If device disconnected, break the loop
-            if (e.name === 'NetworkError' || (e.message && e.message.toLowerCase().includes('disconnect'))) {
-              break;
-            }
+            console.warn("BLE Write Error (Start Machine):", e.name, e.message);
           }
-          
-          // Wait 500ms before next poll to avoid overwhelming the hardware
-          await new Promise(resolve => setTimeout(resolve, 500));
         }
         
         isPolling = false;
